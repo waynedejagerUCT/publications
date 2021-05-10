@@ -1,0 +1,176 @@
+
+import numpy as np
+import xarray as xr
+import datetime
+import metpy.calc as mpcalc
+from metpy.units import units
+import scipy.spatial as spatial
+import pandas as pd
+
+def Error_NoFile():
+    print ('[X] Missing '+product+' dataset')
+    row = [date, product, sea, radius, np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan]
+    main_table.append(row)
+    del row
+    return
+
+def Error_AllNanValues():
+    print ('[X] NaN only '+product+' dataset')
+    row = [date, product, sea, radius, np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan]
+    main_table.append(row)
+    del row
+    return
+
+def VortSearchLoop(ICE_VORT, xc, yc, xc1, yc1):
+    print('[*] VortSearchLoop...')
+
+    cyc_vort     = 0
+    anticyc_vort = 0
+    cyc_x        = 0
+    cyc_y        = 0
+    anticyc_x    = 0
+    anticyc_y    = 0
+        
+    points = np.transpose([np.tile(xc, len(yc)), np.repeat(yc, len(xc))])
+    point_tree = spatial.cKDTree(points)    
+        
+    for x in xc1:
+        for y in yc1:
+            
+            points_region1  = point_tree.data[point_tree.query_ball_point([x, y], radius)]
+            VortArr = []
+        
+            for i in points_region1:
+                value_xc       = i[0]
+                value_yc       = i[1]
+                    
+                index_xc       = np.where(xc == value_xc)[0][0]
+                index_yc       = np.where(yc == value_yc)[0][0]
+                VortArr.append(ICE_VORT[index_yc][index_xc].magnitude)
+                     
+            if sum(np.isnan(VortArr))/len(VortArr) <= isnan_threshold:  #must contain 90% non-NaN values
+                MeanVort = np.nanmean(VortArr)
+                if MeanVort < cyc_vort:
+                    cyc_vort = MeanVort
+                    cyc_x = x
+                    cyc_y = y
+                    
+                if MeanVort > anticyc_vort:
+                    anticyc_vort = MeanVort
+                    anticyc_x = x
+                    anticyc_y = y
+    
+    #acounts for not meeting isnan_threshold on any iteration
+    if cyc_vort == 0:
+        cyc_vort = np.nan
+        cyc_x    = np.nan
+        cyc_y    = np.nan
+    
+    if anticyc_vort == 0:
+        anticyc_vort = np.nan
+        anticyc_x    = np.nan
+        anticyc_y    = np.nan
+    
+    return cyc_x, cyc_y, cyc_vort, anticyc_x, anticyc_y, anticyc_vort
+    
+
+def VortSearch_osisaf():
+    print('[*] VortSearch_osisaf...')
+    #predefined subregions on osisaf grid
+    if sea=='weddell':
+        xc_max =  62.5*4
+        xc_min = -62.5*40
+        yc_max =  62.5*60
+        yc_min =  62.5*12
+    else:
+        print ('Error finding sea')
+        
+    #Unique total and sub-region coverage
+    xc = np.arange(-3875, 3912.5, 62.5)
+    yc = np.arange(4250, -3912.5, -62.5)
+    xc1 = np.arange(xc_min, xc_max+62.5, 62.5)
+    yc1 = np.arange(yc_max, yc_min-62.5, -62.5)
+    
+    date0 = date - delta_1day
+    date0 = str(date0.year)+str(date0.month).zfill(2)+str(date0.day).zfill(2)
+    date1 = date + delta_1day
+    date1 = str(date1.year)+str(date1.month).zfill(2)+str(date1.day).zfill(2)
+  
+    fname = 'ice_drift_sh_polstere-625_'+product+'_'+date0+'1200-'+date1+'1200.nc'
+    fdir  = '/home/mydatafolder/'+fname
+    
+    '''Try statement accommodates missing data files'''
+    try:
+        ds_osisafmerged = xr.open_dataset(fdir+fname)
+        #original units: kilometers per 48hrs 
+        #adjusted units: meters per second
+        U        = ((ds_osisafmerged.dX[0].values)*1000)/(2*24*60*60)
+        V        = ((ds_osisafmerged.dY[0].values)*1000)/(2*24*60*60)
+        
+        ICE_VORT = mpcalc.vorticity(U*units.meter/units.second, V*units.meter/units.second, 62.5*units.kilometer, -62.5*units.kilometer)
+    
+        '''if statements accommodates files of nan values'''
+        if np.isnan(ICE_VORT).all() == False:
+            #Iterate through every cell in subregion
+            cyc_x, cyc_y, cyc_vort, anticyc_x, anticyc_y, anticyc_vort = VortSearchLoop(ICE_VORT, xc, yc, xc1, yc1)
+            row = [date, product, sea, radius, cyc_x, cyc_y, cyc_vort, anticyc_x, anticyc_y, anticyc_vort, xc_max, xc_min, yc_max, yc_min]
+            main_table.append(row)
+            del row
+            
+        else:
+            Error_AllNanValues()
+           
+    except (OSError, KeyError):
+        Error_NoFile()
+        pass
+    
+    return
+
+def Save_VortSearchToDataframe():
+    print('[*] Save_VortSearchToDataframe...')
+    data = {'date'        : [row[0] for row in main_table],
+            'product'     : product,
+            'sea'         : sea,
+            'radius'      : radius,
+            'cyc_x'       : [row[4] for row in main_table],
+            'cyc_y'       : [row[5] for row in main_table],
+            'cyc_vort'    : [row[6] for row in main_table],
+            'anticyc_x'   : [row[7] for row in main_table],
+            'anticyc_y'   : [row[8] for row in main_table],
+            'anticyc_vort': [row[9] for row in main_table],
+            'xc_max'      : [row[10] for row in main_table],
+            'xc_min'      : [row[11] for row in main_table],
+            'yc_max'      : [row[12] for row in main_table],
+            'yc_min'      : [row[13] for row in main_table]
+            }
+    df_VortSearch = pd.DataFrame(data)
+    df_VortSearch.to_csv('/home/mydataframefolder/')
+    return
+
+if __name__ == '__main__':
+    
+    product           = 'multi-oi'
+    sea               = 'weddell'
+    radius            = 500
+    isnan_threshold   = 0.1
+    version           = 'v006'
+    
+    start_date = datetime.datetime(2015,1,1)
+    end_date   = datetime.datetime(2020,12,31)
+    delta_1day = datetime.timedelta(days = 1)
+    
+    main_table        = []
+
+    date = start_date
+    while date<=end_date:
+        print('ITERATION DATE: ' + str(date.year)+'-'+str(date.month).zfill(2)+'-'+str(date.day).zfill(2))
+        
+        VortSearch_osisaf()
+         
+        print('---------------------------------')
+        date = date + delta_1day
+        
+        
+    print ('--SEARCH COMPLETE--')
+    Save_VortSearchToDataframe()
+    print ('--TASK COMPLETE--')
